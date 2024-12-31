@@ -1,77 +1,75 @@
-let orders = [];
-let orderId = 1;
+const { Router } = require('express');
+const WebSocket = require('ws');
 
-const validateOrder = (order) => {
-  if (!order) {
-    return { error: 'Missing body', valid: false };
-  }
-  if (typeof order.name !== 'string' || !order.name.trim()) {
-    return { error: 'Invalid Name', valid: false };
-  }
-  if (!order.zipCode || !/^[0-9]{5}$/i.test(order.zipCode)) {
-    return { error: 'Invalid Zip Code', valid: false };
-  }
-  if (order.zipCode === '99999') {
-    return { error: "We don't ship to 99999.", valid: false };
-  }
-  if (!Array.isArray(order.items) || order.items.length === 0) {
-    return { error: 'You must order at least one item.', valid: false };
-  }
-  return { valid: true };
+const authMiddleware = require('../middleware/authMiddleware');
+const webSocketServer = require('../webSocketServer');
+const orderData = require('../data/orders');
+
+const sendOrders = () => {
+  webSocketServer.clients.forEach((client) => {
+    if (client.readyState === WebSocket.OPEN) {
+      client.send(JSON.stringify(orderData.getOrders()));
+    }
+  });
 };
 
-const createOrder = (order) => {
-  const result = validateOrder(order);
-  if (!result.valid) {
-    return { success: false, ...result };
-  }
+webSocketServer.on('connection', (ws) => {
+  ws.send(JSON.stringify(orderData.getOrders()));
+});
 
-  const id = `${orderId}`;
-  orderId += 1;
-  const newOrder = {
-    id,
-    name: order.name,
-    phone: order.phone,
-    zipCode: order.zipCode,
-    items: order.items,
-  };
-  orders.push(newOrder);
+const orderRoutes = Router();
+orderRoutes.route('/')
+  .post((req, res) => {
+    const order = req.body;
+    const result = orderData.createOrder(order);
+    if (!result.success) {
+      res.status(400).send(result);
+    } else {
+      res.status(201).send();
+      sendOrders();
+    }
+  })
+  .delete((req, res) => {
+    orderData.deleteOrders();
+    res.send('deleted all orders');
+    sendOrders();
+  })
+  .get((req, res) => {
+    res.json(orderData.getOrders());
+  });
 
-  return { success: true };
-};
+// Routes for a single model
+orderRoutes.route('/:id')
+  .get((req, res) => {
+    const order = orderData.getOrders().find(({ id }) => id === req.params.id);
+    if (order) {
+      res.json(order);
+    } else {
+      res.status(404).send('No order found');
+    }
+  })
+  .put(authMiddleware, (req, res) => {
+    if (!orderData.getOrders().some(({ id }) => id === req.params.id)) {
+      res.status(404).send();
+    } else {
+      const editedOrder = req.body;
+      const result = orderData.editOrder(req.params.id, editedOrder);
+      if (!result.success) {
+        res.status(400).send(result);
+      } else {
+        res.json(result.order);
+        sendOrders();
+      }
+    }
+  })
+  .delete(authMiddleware, (req, res) => {
+    if (!orderData.getOrders().some(({ id }) => id === req.params.id)) {
+      res.status(404).send();
+    } else {
+      orderData.deleteOrder(req.params.id);
+      res.json({ message: `Successfully deleted coffee order ${req.params.id}` });
+      sendOrders();
+    }
+  });
 
-const deleteOrders = () => {
-  orders = [];
-};
-
-const deleteOrder = (id) => {
-  orders = orders.filter((order) => order.id !== id);
-};
-
-const editOrder = (id, editedOrder) => {
-  const result = validateOrder(editedOrder);
-  if (!result.valid) {
-    return { success: false, ...result };
-  }
-
-  orders = orders.map((order) => (order.id === id ? {
-    ...order,
-    items: editedOrder.items,
-    name: editedOrder.name,
-    phone: editedOrder.phone,
-    zipCode: editedOrder.zipCode,
-  } : order));
-
-  return { success: true, order: orders.find((order) => order.id === id) };
-};
-
-const getOrders = () => orders;
-
-module.exports = {
-  createOrder,
-  deleteOrders,
-  deleteOrder,
-  editOrder,
-  getOrders,
-  validateOrder,
-};
+module.exports = orderRoutes;
